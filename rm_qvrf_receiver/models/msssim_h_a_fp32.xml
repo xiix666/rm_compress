@@ -1,0 +1,326 @@
+<?xml version="1.0"?>
+<net name="onnx_Frontend_IR" version="11">
+	<layers>
+		<layer id="0" name="y" type="Parameter" version="opset1">
+			<data shape="?,192,?,?" element_type="f32" />
+			<output>
+				<port id="0" precision="FP32" names="y">
+					<dim>-1</dim>
+					<dim>192</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="1" name="0.weight" type="Const" version="opset1">
+			<data element_type="f32" shape="128, 192, 3, 3" offset="0" size="884736" />
+			<output>
+				<port id="0" precision="FP32" names="0.weight">
+					<dim>128</dim>
+					<dim>192</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="2" name="/0/Conv/WithoutBiases" type="Convolution" version="opset1">
+			<data strides="1, 1" dilations="1, 1" pads_begin="1, 1" pads_end="1, 1" auto_pad="explicit" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>192</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>128</dim>
+					<dim>192</dim>
+					<dim>3</dim>
+					<dim>3</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="3" name="Reshape_2826" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 128, 1, 1" offset="884736" size="512" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>128</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="4" name="/0/Conv" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>128</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="/0/Conv_output_0">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="5" name="Constant_2828" type="Const" version="opset1">
+			<data element_type="f32" shape="1" offset="885248" size="4" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="6" name="/1/LeakyRelu" type="PReLU" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="/1/LeakyRelu_output_0">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="7" name="2.weight" type="Const" version="opset1">
+			<data element_type="f32" shape="128, 128, 5, 5" offset="885252" size="1638400" />
+			<output>
+				<port id="0" precision="FP32" names="2.weight">
+					<dim>128</dim>
+					<dim>128</dim>
+					<dim>5</dim>
+					<dim>5</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="8" name="/2/Conv/WithoutBiases" type="Convolution" version="opset1">
+			<data strides="2, 2" dilations="1, 1" pads_begin="2, 2" pads_end="2, 2" auto_pad="explicit" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>128</dim>
+					<dim>128</dim>
+					<dim>5</dim>
+					<dim>5</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="9" name="Reshape_2843" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 128, 1, 1" offset="2523652" size="512" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>128</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="10" name="/2/Conv" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>128</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="/2/Conv_output_0">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="11" name="Constant_2845" type="Const" version="opset1">
+			<data element_type="f32" shape="1" offset="885248" size="4" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="12" name="/3/LeakyRelu" type="PReLU" version="opset1">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="/3/LeakyRelu_output_0">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="13" name="4.weight" type="Const" version="opset1">
+			<data element_type="f32" shape="128, 128, 5, 5" offset="2524164" size="1638400" />
+			<output>
+				<port id="0" precision="FP32" names="4.weight">
+					<dim>128</dim>
+					<dim>128</dim>
+					<dim>5</dim>
+					<dim>5</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="14" name="/4/Conv/WithoutBiases" type="Convolution" version="opset1">
+			<data strides="2, 2" dilations="1, 1" pads_begin="2, 2" pads_end="2, 2" auto_pad="explicit" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>128</dim>
+					<dim>128</dim>
+					<dim>5</dim>
+					<dim>5</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="15" name="Reshape_2860" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 128, 1, 1" offset="4162564" size="512" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>128</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="16" name="z" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>128</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="z">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="17" name="z/sink_port_0" type="Result" version="opset1" output_names="z">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>128</dim>
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+			</input>
+		</layer>
+	</layers>
+	<edges>
+		<edge from-layer="0" from-port="0" to-layer="2" to-port="0" />
+		<edge from-layer="1" from-port="0" to-layer="2" to-port="1" />
+		<edge from-layer="2" from-port="2" to-layer="4" to-port="0" />
+		<edge from-layer="3" from-port="0" to-layer="4" to-port="1" />
+		<edge from-layer="4" from-port="2" to-layer="6" to-port="0" />
+		<edge from-layer="5" from-port="0" to-layer="6" to-port="1" />
+		<edge from-layer="6" from-port="2" to-layer="8" to-port="0" />
+		<edge from-layer="7" from-port="0" to-layer="8" to-port="1" />
+		<edge from-layer="8" from-port="2" to-layer="10" to-port="0" />
+		<edge from-layer="9" from-port="0" to-layer="10" to-port="1" />
+		<edge from-layer="10" from-port="2" to-layer="12" to-port="0" />
+		<edge from-layer="11" from-port="0" to-layer="12" to-port="1" />
+		<edge from-layer="12" from-port="2" to-layer="14" to-port="0" />
+		<edge from-layer="13" from-port="0" to-layer="14" to-port="1" />
+		<edge from-layer="14" from-port="2" to-layer="16" to-port="0" />
+		<edge from-layer="15" from-port="0" to-layer="16" to-port="1" />
+		<edge from-layer="16" from-port="2" to-layer="17" to-port="0" />
+	</edges>
+	<rt_info>
+		<Runtime_version value="2026.1.0-21367-63e31528c62-releases/2026/1" />
+		<conversion_parameters>
+			<input_model value="DIR/msssim_h_a.onnx" />
+			<is_python_object value="False" />
+		</conversion_parameters>
+	</rt_info>
+</net>
