@@ -10,7 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # OpenVINO
 find_package(OpenVINO REQUIRED)
-
+find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui imgcodecs)
 option(RMCOMPRESS_ENABLE_TENSORRT "Enable optional TensorRT g_a sender backend" OFF)
 
 if(RMCOMPRESS_ENABLE_TENSORRT)
@@ -90,8 +90,10 @@ add_executable(rm_compress_cli
 )
 target_include_directories(rm_compress_cli PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${OpenCV_INCLUDE_DIRS}
 )
-target_link_libraries(rm_compress_cli PRIVATE rmcompress)
+
+target_link_libraries(rm_compress_cli PRIVATE rmcompress ${OpenCV_LIBS})
 
 # --- QVRF dry-run parity harness ---
 add_executable(qvrf_dryrun_dump
@@ -114,8 +116,8 @@ if(EXISTS "${MVS_INCLUDE_DIR}/MvCameraControl.h" AND EXISTS "${MVS_LIB_DIR}/libM
     target_include_directories(rm_camera_capture PRIVATE
         ${MVS_INCLUDE_DIR}
     )
-    target_link_directories(rm_camera_capture PRIVATE ${MVS_LIB_DIR})
-    target_link_libraries(rm_camera_capture PRIVATE rmcompress MvCameraControl pthread)
+    target_link_directories(rm_camera_capture PRIVATE ${MVS_LIB_DIR} ${OpenCV_LIBS})
+    target_link_libraries(rm_camera_capture PRIVATE rmcompress MvCameraControl pthread ${OpenCV_LIBS})
     set_target_properties(rm_camera_capture PROPERTIES
         BUILD_RPATH "${MVS_LIB_DIR}"
         INSTALL_RPATH "${MVS_LIB_DIR}"

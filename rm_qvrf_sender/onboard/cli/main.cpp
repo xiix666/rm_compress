@@ -22,18 +22,59 @@
 #include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
-
+#include <opencv2/core.hpp>
+#include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
 #include "rmcompress/rm_compress.h"
 #include "rmcompress/protocol.h"
 #include "rmcompress/shm_ring.h"
 #include "serial/serial_tx.h"
-
+#include <iostream>
 static std::atomic<bool> g_stop{false};
 
 static void handle_signal(int) {
     g_stop.store(true);
 }
+static void visualize_bgr_frame(const std::vector<uint8_t>& bgr,
+                                int width,
+                                int height,
+                                uint32_t frame_id,
+                                bool show_window,
+                                bool save_image,
+                                const std::string& save_dir,
+                                const char* prefix) {
+    if (bgr.empty()) return;
 
+    cv::Mat img(height, width, CV_8UC3, const_cast<uint8_t*>(bgr.data()));
+
+    // 为了显示更舒服，可以缩放到固定大小
+    cv::Mat vis;
+    const int max_show = 640;
+    if (width > max_show || height > max_show) {
+        double scale = std::min(max_show / static_cast<double>(width),
+                                max_show / static_cast<double>(height));
+        cv::resize(img, vis, cv::Size(), scale, scale, cv::INTER_AREA);
+    } else {
+        vis = img;
+    }
+
+    if (show_window) {
+        std::string win_name = std::string(prefix);
+        cv::imshow(win_name, vis);
+        cv::waitKey(0);
+    }
+
+    // if (save_image) {
+    //     std::string cmd = "mkdir -p " + save_dir;
+    //     std::system(cmd.c_str());
+
+    //     char path[512];
+    //     std::snprintf(path, sizeof(path), "%s/%s_%06u.png",
+    //                   save_dir.c_str(), prefix, frame_id);
+
+    //     cv::imwrite(path, img);
+    // }
+}
 static bool open_shm_with_retry(rmcompress::ShmRing& shm_ring, const char* shm_name) {
     std::string error;
     auto last_log = std::chrono::steady_clock::now() - std::chrono::seconds(2);
@@ -132,7 +173,15 @@ static int connect_tcp_with_retry(const char* host, int port) {
     }
     return -1;
 }
-
+static void convert_bgr_buffer_to_rgb(const uint8_t* bgr,
+                                      uint8_t* rgb,
+                                      int width,
+                                      int height)
+{
+    cv::Mat bgr_mat(height, width, CV_8UC3, const_cast<uint8_t*>(bgr));
+    cv::Mat rgb_mat(height, width, CV_8UC3, rgb);
+    cv::cvtColor(bgr_mat, rgb_mat, cv::COLOR_BGR2RGB);
+}
 static bool write_all(int fd, const uint8_t* data, size_t len) {
     size_t off = 0;
     while (off < len && !g_stop.load()) {
@@ -556,6 +605,7 @@ int main(int argc, char* argv[]) {
 
     // --- Allocate buffers ---
     const int frame_bytes = width * height * 3;
+    std::vector<uint8_t> frame_bgr(frame_bytes);
     std::vector<uint8_t> frame_rgb(frame_bytes);
     std::vector<uint8_t> shm_frame;
     std::vector<uint8_t> bitstream(8192);  // compressed output (generous)
@@ -636,7 +686,7 @@ int main(int argc, char* argv[]) {
             bool have_item = false;
             {
                 std::unique_lock<std::mutex> lock(queue_mutex);
-                if (!started) {
+                if (!started) {   //预缓冲 攒够prebuffer_chunks才开始发送
                     queue_cv.wait(lock, [&]() {
                         return enqueue_done ||
                             prebuffer_chunks <= 0 ||
@@ -649,7 +699,7 @@ int main(int argc, char* argv[]) {
             }
 
             auto now = std::chrono::steady_clock::now();
-            if (now < next_chunk_time) {
+            if (now < next_chunk_time) {  //按固定频率发送
                 std::this_thread::sleep_until(next_chunk_time);
             }
             const auto send_start = std::chrono::steady_clock::now();
@@ -666,7 +716,7 @@ int main(int argc, char* argv[]) {
             }
 
             if (!have_item) {
-                tx_underruns++;
+                tx_underruns++;  //没发包的次数
                 next_chunk_time += chunk_step;
                 const auto after_tick = std::chrono::steady_clock::now();
                 if (next_chunk_time < after_tick) {
@@ -699,7 +749,7 @@ int main(int argc, char* argv[]) {
                     enqueue_to_send_ms);
             }
 
-            if (ipc_output) {
+            if (ipc_output) {  //tcp 输出chunk
                 if (ipc_fd < 0 || !write_all(ipc_fd, item.data.data(), item.data.size())) {
                     total_errors++;
                     if (ipc_fd >= 0) close(ipc_fd);
@@ -754,7 +804,7 @@ int main(int argc, char* argv[]) {
 
             next_chunk_time += chunk_step;
             const auto after_send = std::chrono::steady_clock::now();
-            if (next_chunk_time < after_send) {
+            if (next_chunk_time < after_send) {  //发送时间超了，下次发送时间重置
                 next_chunk_time = after_send + chunk_step;
             }
         }
@@ -804,7 +854,22 @@ int main(int argc, char* argv[]) {
                         frame_id, fh.width, fh.height, fh.data_bytes);
                 break;
             }
-            std::memcpy(frame_rgb.data(), shm_frame.data(), frame_bytes);
+
+            std::memcpy(frame_bgr.data(), shm_frame.data(), frame_bytes); //!
+            convert_bgr_buffer_to_rgb(frame_bgr.data(), frame_rgb.data(), width, height);
+            bool show_input = true;
+            bool save_input = false;
+            int vis_every_n = 1;
+            const char* vis_dir = "vis_debug";
+            // visualize_bgr_frame(frame_bgr,
+            //             width,
+            //             height,
+            //             static_cast<uint32_t>(frame_id),
+            //             show_input,
+            //             save_input,
+            //             vis_dir,
+            //             "input");
+
             if (fh.timestamp_ns > 0) {
                 const uint64_t now_ns = rmcompress::monotonic_time_ns();
                 if (now_ns >= fh.timestamp_ns) {
@@ -820,7 +885,25 @@ int main(int argc, char* argv[]) {
         auto t0 = std::chrono::steady_clock::now();
         int bitstream_len = static_cast<int>(bitstream.size());
         int ret = rm_compress_frame(compressor, frame_rgb.data(),
-                                    bitstream.data(), &bitstream_len);
+                                    bitstream.data(), &bitstream_len);//!  压缩成bit流
+        const rm_compress_stats_t* st = rm_compressor_last_stats(compressor);                            
+        if (ret == 0) {
+        std::cout << "[OK] compress success, size=" << bitstream_len
+                << " bytes, rc_passes=" << st->rc_passes
+                << ", beta/gain=" << st->beta
+                << ", total=" << st->total_ms << " ms"
+                << std::endl;
+        }
+        else if (ret == -2) {
+            std::cout << "[OVER] compressed but too large, need="
+                    << bitstream_len << " bytes"
+                    << ", limit maybe max_packed_bytes"
+                    << ", beta/gain=" << st->beta
+                    << std::endl;
+        }
+        else {
+            std::cout << "[FAIL] compress failed" << std::endl;
+        }
         auto t1 = std::chrono::steady_clock::now();
         double compress_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         last_compress_ms = compress_ms;
@@ -873,7 +956,7 @@ int main(int argc, char* argv[]) {
                                      bitstream.data(), bitstream_len, fixed_chunks,
                                      fec_data_chunks, stream_id)
                 : pack_frame_fixed_n(static_cast<uint32_t>(frame_id),
-                                     bitstream.data(), bitstream_len, fixed_chunks, stream_id));
+                                     bitstream.data(), bitstream_len, fixed_chunks, stream_id)); //拆两个包
 
         // 4. Enqueue chunks for the serial sender thread.
         int queue_depth_after_enqueue = 0;
@@ -882,10 +965,10 @@ int main(int argc, char* argv[]) {
         if (!single_packet_mode && fixed_chunks == 4 && chunks.size() == 4 && chunk_order.size() == 4) {
             // The 0x0310 bridge can lose a consistent packet position in a 4-packet burst.
             // Keep this configurable so tests can place the tail chunk in the weak slot.
-            enqueue_order = chunk_order;
+            enqueue_order = chunk_order;    //0 3 1 2 
         } else {
             for (size_t i = 0; i < chunks.size(); ++i) {
-                enqueue_order.push_back(i);
+                enqueue_order.push_back(i);    //默认顺序入列 0,1
             }
         }
 
@@ -894,7 +977,7 @@ int main(int argc, char* argv[]) {
             if (max_queue_chunks > 0) {
                 const int incoming = static_cast<int>(chunks.size());
                 while (!send_queue.empty() &&
-                       static_cast<int>(send_queue.size()) + incoming > max_queue_chunks) {
+                       static_cast<int>(send_queue.size()) + incoming > max_queue_chunks) { //发送队列太长 丢掉一帧
                     const uint32_t drop_frame_id = send_queue.front().frame_id;
                     while (!send_queue.empty() && send_queue.front().frame_id == drop_frame_id) {
                         send_queue.pop_front();

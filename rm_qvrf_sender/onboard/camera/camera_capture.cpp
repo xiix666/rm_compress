@@ -6,12 +6,17 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cerrno>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include "MvCameraControl.h"
 #include "rmcompress/shm_ring.h"
 
 namespace {
-
+static constexpr const char* kCameraSerial = "DB0178675";
 volatile std::sig_atomic_t g_stop = 0;
 
 void on_signal(int) {
@@ -24,12 +29,24 @@ struct CameraOptions {
     unsigned int device_index = 0;
     int max_frames = 0;
     int roi_size = 1080;
+    int crop_size = 448;
     bool auto_square_roi = false;
     double fps = 24.0;
     double exposure_us = 20000.0;
     bool allow_adjust_roi = false;
 };
+void unlink_shm_if_exists(const char* shm_name) {
+    if (!shm_name || shm_name[0] != '/') {
+        return;
+    }
 
+    if (shm_unlink(shm_name) != 0 && errno != ENOENT) {
+        std::fprintf(stderr,
+                     "Warning: shm_unlink(%s) failed: errno=%d\n",
+                     shm_name,
+                     errno);
+    }
+}
 struct SessionResult {
     bool reconnect = false;
     int frames = 0;
@@ -57,6 +74,53 @@ bool check(int ret, const char* op) {
     if (ret == MV_OK) return true;
     std::fprintf(stderr, "%s failed: 0x%x\n", op, ret);
     return false;
+}
+
+bool center_crop_bgr(
+    const std::vector<uint8_t>& src,
+    uint32_t src_w,
+    uint32_t src_h,
+    uint32_t crop_w,
+    uint32_t crop_h,
+    std::vector<uint8_t>& dst)
+{
+    if (src_w == 0 || src_h == 0 || crop_w == 0 || crop_h == 0) {
+        std::fprintf(stderr, "Invalid crop size: src=%ux%u crop=%ux%u\n",
+                     src_w, src_h, crop_w, crop_h);
+        return false;
+    }
+
+    if (crop_w > src_w || crop_h > src_h) {
+        std::fprintf(stderr, "Crop size %ux%u is larger than source frame %ux%u\n",
+                     crop_w, crop_h, src_w, src_h);
+        return false;
+    }
+
+    const size_t expected_src_size = static_cast<size_t>(src_w) * src_h * 3;
+    if (src.size() < expected_src_size) {
+        std::fprintf(stderr, "Source BGR buffer too short: size=%zu need=%zu\n",
+                     src.size(), expected_src_size);
+        return false;
+    }
+
+    const size_t dst_size = static_cast<size_t>(crop_w) * crop_h * 3;
+    if (dst.size() != dst_size) {
+        dst.resize(dst_size);
+    }
+
+    const uint32_t x0 = (src_w - crop_w) / 2;
+    const uint32_t y0 = (src_h - crop_h) / 2;
+    const size_t src_stride = static_cast<size_t>(src_w) * 3;
+    const size_t dst_stride = static_cast<size_t>(crop_w) * 3;
+
+    for (uint32_t y = 0; y < crop_h; ++y) {
+        const uint8_t* src_row = src.data() + static_cast<size_t>(y0 + y) * src_stride
+                                 + static_cast<size_t>(x0) * 3;
+        uint8_t* dst_row = dst.data() + static_cast<size_t>(y) * dst_stride;
+        std::memcpy(dst_row, src_row, dst_stride);
+    }
+
+    return true;
 }
 
 int64_t align_down(int64_t value, int64_t min_value, int64_t inc) {
@@ -94,6 +158,52 @@ void warn_if_fail(int ret, const char* op) {
         std::fprintf(stderr, "Warning: %s failed: 0x%x\n", op, ret);
     }
 }
+struct CameraGuard {
+    void* handle = nullptr;
+    bool opened = false;
+    bool grabbing = false;
+    rmcompress::ShmRing* ring = nullptr;
+
+    void cleanup() {
+        if (handle) {
+            if (grabbing) {
+                
+                warn_if_fail(MV_CC_SetCommandValue(handle, "AcquisitionStop"),
+                            "AcquisitionStop");
+
+                warn_if_fail(MV_CC_ClearImageBuffer(handle),
+                            "MV_CC_ClearImageBuffer");
+
+                warn_if_fail(MV_CC_StopGrabbing(handle),
+                            "MV_CC_StopGrabbing");
+
+                grabbing = false;
+            }
+
+            if (ring) {
+                ring->close();
+                ring = nullptr;
+            }
+
+            if (opened) {
+                warn_if_fail(MV_CC_CloseDevice(handle), "MV_CC_CloseDevice");
+                opened = false;
+            }
+
+            warn_if_fail(MV_CC_DestroyHandle(handle), "MV_CC_DestroyHandle");
+            handle = nullptr;
+        } else {
+            if (ring) {
+                ring->close();
+                ring = nullptr;
+            }
+        }
+    }
+
+    ~CameraGuard() {
+        cleanup();
+    }
+};
 
 bool configure_center_roi(void* handle, int requested_size, bool auto_square, bool allow_adjust,
                           uint32_t* out_w, uint32_t* out_h) {
@@ -190,7 +300,55 @@ bool configure_center_roi(void* handle, int requested_size, bool auto_square, bo
     *out_h = static_cast<uint32_t>(actual_h.nCurValue);
     return true;
 }
+const char* get_camera_serial(const MV_CC_DEVICE_INFO* info) {
+    if (!info) return "";
 
+    if (info->nTLayerType == MV_GIGE_DEVICE) {
+        return reinterpret_cast<const char*>(
+            info->SpecialInfo.stGigEInfo.chSerialNumber);
+    }
+
+    if (info->nTLayerType == MV_USB_DEVICE) {
+        return reinterpret_cast<const char*>(
+            info->SpecialInfo.stUsb3VInfo.chSerialNumber);
+    }
+
+    return "";
+}
+
+const char* get_camera_model(const MV_CC_DEVICE_INFO* info) {
+    if (!info) return "";
+
+    if (info->nTLayerType == MV_GIGE_DEVICE) {
+        return reinterpret_cast<const char*>(
+            info->SpecialInfo.stGigEInfo.chModelName);
+    }
+
+    if (info->nTLayerType == MV_USB_DEVICE) {
+        return reinterpret_cast<const char*>(
+            info->SpecialInfo.stUsb3VInfo.chModelName);
+    }
+
+    return "";
+}
+
+MV_CC_DEVICE_INFO* find_hardcoded_camera(MV_CC_DEVICE_INFO_LIST& devices) {
+    for (unsigned int i = 0; i < devices.nDeviceNum; ++i) {
+        MV_CC_DEVICE_INFO* info = devices.pDeviceInfo[i];
+        const char* serial = get_camera_serial(info);
+
+        std::printf("[device %u] model=%s serial=%s\n",
+                    i, get_camera_model(info), serial);
+
+        if (std::strcmp(serial, kCameraSerial) == 0) {
+            std::printf("Selected hardcoded camera: index=%u model=%s serial=%s\n",
+                        i, get_camera_model(info), serial);
+            return info;
+        }
+    }
+
+    return nullptr;
+}
 bool print_device(MV_CC_DEVICE_INFO* info, unsigned int index) {
     if (!info) return false;
     std::printf("[device %u] ", index);
@@ -205,22 +363,252 @@ bool print_device(MV_CC_DEVICE_INFO* info, unsigned int index) {
     }
     return true;
 }
+bool convert_frame_to_bgr_opencv(
+    const MV_FRAME_OUT& frame,
+    uint32_t expected_width,
+    uint32_t expected_height,
+    std::vector<uint8_t>& bgr)
+{
+    uint32_t frame_w = frame.stFrameInfo.nExtendWidth;
+    uint32_t frame_h = frame.stFrameInfo.nExtendHeight;
+    uint64_t frame_len = frame.stFrameInfo.nFrameLenEx;
 
+    if (frame_w == 0) {
+        frame_w = frame.stFrameInfo.nWidth;
+    }
+    if (frame_h == 0) {
+        frame_h = frame.stFrameInfo.nHeight;
+    }
+    if (frame_len == 0) {
+        frame_len = frame.stFrameInfo.nFrameLen;
+    }
+
+    if (frame.pBufAddr == nullptr || frame_w == 0 || frame_h == 0 || frame_len == 0) {
+        std::fprintf(
+            stderr,
+            "Invalid frame buffer: w=%u h=%u len=%lu pixel=0x%x pBuf=%p\n",
+            frame_w,
+            frame_h,
+            static_cast<unsigned long>(frame_len),
+            frame.stFrameInfo.enPixelType,
+            frame.pBufAddr);
+        return false;
+    }
+
+    if (frame_w != expected_width || frame_h != expected_height) {
+        std::fprintf(
+            stderr,
+            "Frame size mismatch: frame=%ux%u expected=%ux%u pixel=0x%x\n",
+            frame_w,
+            frame_h,
+            expected_width,
+            expected_height,
+            frame.stFrameInfo.enPixelType);
+        return false;
+    }
+
+    const size_t bgr_size = static_cast<size_t>(expected_width) * expected_height * 3;
+    if (bgr.size() != bgr_size) {
+        bgr.resize(bgr_size);
+    }
+
+    const auto pixel_type = frame.stFrameInfo.enPixelType;
+
+    try {
+        // 情况 1：相机已经输出 BGR8，直接复制
+        if (pixel_type == PixelType_Gvsp_BGR8_Packed) {
+            if (frame_len < bgr_size) {
+                std::fprintf(
+                    stderr,
+                    "BGR8 frame too short: len=%lu need=%zu\n",
+                    static_cast<unsigned long>(frame_len),
+                    bgr_size);
+                return false;
+            }
+
+            std::memcpy(bgr.data(), frame.pBufAddr, bgr_size);
+            return true;
+        }
+
+        // 情况 2：相机输出 RGB8，OpenCV 转成 BGR
+        if (pixel_type == PixelType_Gvsp_RGB8_Packed) {
+            const size_t rgb_size = bgr_size;
+            if (frame_len < rgb_size) {
+                std::fprintf(
+                    stderr,
+                    "RGB8 frame too short: len=%lu need=%zu\n",
+                    static_cast<unsigned long>(frame_len),
+                    rgb_size);
+                return false;
+            }
+
+            cv::Mat rgb(
+                static_cast<int>(frame_h),
+                static_cast<int>(frame_w),
+                CV_8UC3,
+                frame.pBufAddr);
+
+            cv::Mat bgr_mat(
+                static_cast<int>(expected_height),
+                static_cast<int>(expected_width),
+                CV_8UC3,
+                bgr.data());
+
+            cv::cvtColor(rgb, bgr_mat, cv::COLOR_RGB2BGR);
+            return true;
+        }
+
+        // 情况 3：Mono8，转 BGR
+        if (pixel_type == PixelType_Gvsp_Mono8) {
+            const size_t mono_size = static_cast<size_t>(frame_w) * frame_h;
+            if (frame_len < mono_size) {
+                std::fprintf(
+                    stderr,
+                    "Mono8 frame too short: len=%lu need=%zu\n",
+                    static_cast<unsigned long>(frame_len),
+                    mono_size);
+                return false;
+            }
+
+            cv::Mat mono(
+                static_cast<int>(frame_h),
+                static_cast<int>(frame_w),
+                CV_8UC1,
+                frame.pBufAddr);
+
+            cv::Mat bgr_mat(
+                static_cast<int>(expected_height),
+                static_cast<int>(expected_width),
+                CV_8UC3,
+                bgr.data());
+
+            cv::cvtColor(mono, bgr_mat, cv::COLOR_GRAY2BGR);
+            return true;
+        }
+
+        // 情况 4：Bayer 8bit，OpenCV debayer 到 BGR
+        const size_t bayer_size = static_cast<size_t>(frame_w) * frame_h;
+
+        if (pixel_type == PixelType_Gvsp_BayerRG8 ||
+            pixel_type == PixelType_Gvsp_BayerBG8 ||
+            pixel_type == PixelType_Gvsp_BayerGB8 ||
+            pixel_type == PixelType_Gvsp_BayerGR8) {
+            if (frame_len < bayer_size) {
+                std::fprintf(
+                    stderr,
+                    "Bayer8 frame too short: len=%lu need=%zu pixel=0x%x\n",
+                    static_cast<unsigned long>(frame_len),
+                    bayer_size,
+                    pixel_type);
+                return false;
+            }
+
+            cv::Mat bayer(
+                static_cast<int>(frame_h),
+                static_cast<int>(frame_w),
+                CV_8UC1,
+                frame.pBufAddr);
+
+            cv::Mat bgr_mat(
+                static_cast<int>(expected_height),
+                static_cast<int>(expected_width),
+                CV_8UC3,
+                bgr.data());
+
+            int code = -1;
+
+            switch (pixel_type) {
+                case PixelType_Gvsp_BayerRG8:
+                    code = cv::COLOR_BayerRG2BGR;
+                    break;
+                case PixelType_Gvsp_BayerBG8:
+                    code = cv::COLOR_BayerBG2BGR;
+                    break;
+                case PixelType_Gvsp_BayerGB8:
+                    code = cv::COLOR_BayerGB2BGR;
+                    break;
+                case PixelType_Gvsp_BayerGR8:
+                    code = cv::COLOR_BayerGR2BGR;
+                    break;
+                default:
+                    break;
+            }
+
+            if (code < 0) {
+                std::fprintf(stderr, "Unsupported Bayer pixel type: 0x%x\n", pixel_type);
+                return false;
+            }
+
+            cv::cvtColor(bayer, bgr_mat, code);
+            return true;
+        }
+
+        std::fprintf(
+            stderr,
+            "Unsupported pixel type for OpenCV conversion: 0x%x, w=%u h=%u len=%lu\n",
+            pixel_type,
+            frame_w,
+            frame_h,
+            static_cast<unsigned long>(frame_len));
+        return false;
+
+    } catch (const cv::Exception& e) {
+        std::fprintf(stderr, "OpenCV convert exception: %s\n", e.what());
+        return false;
+    }
+}
 SessionResult run_camera_session(const CameraOptions& opt, int frames_remaining) {
     SessionResult result{};
-    void* handle = nullptr;
+    // void* handle = nullptr;
     rmcompress::ShmRing ring;
-    int ret = MV_OK;
 
-    auto cleanup = [&]() {
-        if (handle) {
-            MV_CC_StopGrabbing(handle);
-            MV_CC_CloseDevice(handle);
-            MV_CC_DestroyHandle(handle);
-            handle = nullptr;
-        }
-        ring.close();
-    };
+
+    // int ret = MV_OK;
+
+    // auto cleanup = [&]() {
+    //     if (handle) {
+    //         MV_CC_StopGrabbing(handle);
+    //         MV_CC_CloseDevice(handle);
+    //         MV_CC_DestroyHandle(handle);
+    //         handle = nullptr;
+    //     }
+    //     ring.close();
+    // };
+
+    // MV_CC_DEVICE_INFO_LIST devices{};
+    // ret = MV_CC_EnumDevices(MV_GIGE_DEVICE | MV_USB_DEVICE |
+    //                         MV_GENTL_CAMERALINK_DEVICE | MV_GENTL_CXP_DEVICE |
+    //                         MV_GENTL_XOF_DEVICE, &devices);
+    // if (!check(ret, "MV_CC_EnumDevices")) {
+    //     result.reconnect = true;
+    //     return result;
+    // }
+    // if (devices.nDeviceNum == 0 || opt.device_index >= devices.nDeviceNum) {
+    //     std::fprintf(stderr, "No camera at index %u (found %u devices)\n",
+    //                  opt.device_index, devices.nDeviceNum);
+    //     result.reconnect = true;
+    //     return result;
+    // }
+    // for (unsigned int i = 0; i < devices.nDeviceNum; ++i) {
+    //     print_device(devices.pDeviceInfo[i], i);
+    // }
+
+    // ret = MV_CC_CreateHandle(&handle, devices.pDeviceInfo[opt.device_index]);
+    // if (!check(ret, "MV_CC_CreateHandle")) {
+    //     result.reconnect = true;
+    //     cleanup();
+    //     return result;
+    // }
+    // ret = MV_CC_OpenDevice(handle, MV_ACCESS_Exclusive, 0);
+    // if (!check(ret, "MV_CC_OpenDevice")) {
+    //     result.reconnect = true;
+    //     cleanup();
+    //     return result;
+    // }
+    CameraGuard cam;
+    cam.ring = &ring;
+
+    int ret = MV_OK;
 
     MV_CC_DEVICE_INFO_LIST devices{};
     ret = MV_CC_EnumDevices(MV_GIGE_DEVICE | MV_USB_DEVICE |
@@ -230,76 +618,114 @@ SessionResult run_camera_session(const CameraOptions& opt, int frames_remaining)
         result.reconnect = true;
         return result;
     }
-    if (devices.nDeviceNum == 0 || opt.device_index >= devices.nDeviceNum) {
-        std::fprintf(stderr, "No camera at index %u (found %u devices)\n",
-                     opt.device_index, devices.nDeviceNum);
+
+    if (devices.nDeviceNum == 0) {
+        std::fprintf(stderr, "No camera found\n");
         result.reconnect = true;
         return result;
     }
-    for (unsigned int i = 0; i < devices.nDeviceNum; ++i) {
-        print_device(devices.pDeviceInfo[i], i);
-    }
 
-    ret = MV_CC_CreateHandle(&handle, devices.pDeviceInfo[opt.device_index]);
+    MV_CC_DEVICE_INFO* selected_device = find_hardcoded_camera(devices);
+    if (!selected_device) {
+        std::fprintf(stderr,
+                    "Hardcoded camera not found, required serial=%s\n",
+                    kCameraSerial);
+        result.reconnect = true;
+        return result;
+    }
+    ret = MV_CC_CreateHandle(&cam.handle, selected_device);
+    // if (devices.nDeviceNum == 0 || opt.device_index >= devices.nDeviceNum) {
+    //     std::fprintf(stderr, "No camera at index %u (found %u devices)\n",
+    //                  opt.device_index, devices.nDeviceNum);
+    //     result.reconnect = true;
+    //     return result;
+    // }
+
+    // for (unsigned int i = 0; i < devices.nDeviceNum; ++i) {
+    //     print_device(devices.pDeviceInfo[i], i);
+    // }
+
+    // ret = MV_CC_CreateHandle(&cam.handle, devices.pDeviceInfo[opt.device_index]);
     if (!check(ret, "MV_CC_CreateHandle")) {
         result.reconnect = true;
-        cleanup();
-        return result;
-    }
-    ret = MV_CC_OpenDevice(handle, MV_ACCESS_Exclusive, 0);
-    if (!check(ret, "MV_CC_OpenDevice")) {
-        result.reconnect = true;
-        cleanup();
         return result;
     }
 
-    if (devices.pDeviceInfo[opt.device_index]->nTLayerType == MV_GIGE_DEVICE) {
-        int pkt = MV_CC_GetOptimalPacketSize(handle);
-        if (pkt > 0) warn_if_fail(MV_CC_SetIntValueEx(handle, "GevSCPSPacketSize", pkt),
+    ret = MV_CC_OpenDevice(cam.handle, MV_ACCESS_Exclusive, 0);
+    if (!check(ret, "MV_CC_OpenDevice")) {
+        result.reconnect = true;
+        return result;
+    }
+    cam.opened = true;
+    // if (devices.pDeviceInfo[opt.device_index]->nTLayerType == MV_GIGE_DEVICE) {
+    if (selected_device->nTLayerType == MV_GIGE_DEVICE) {
+        int pkt = MV_CC_GetOptimalPacketSize(cam.handle);
+        if (pkt > 0) warn_if_fail(MV_CC_SetIntValueEx(cam.handle, "GevSCPSPacketSize", pkt),
                                   "GevSCPSPacketSize");
     }
 
     uint32_t width = 0, height = 0;
-    if (!configure_center_roi(handle, opt.roi_size, opt.auto_square_roi,
+    if (!configure_center_roi(cam.handle, opt.roi_size, opt.auto_square_roi,
                               opt.allow_adjust_roi, &width, &height)) {
         result.reconnect = true;
-        cleanup();
+        cam.cleanup();
         return result;
     }
 
-    warn_if_fail(MV_CC_SetEnumValue(handle, "TriggerMode", MV_TRIGGER_MODE_OFF),
+    warn_if_fail(MV_CC_SetEnumValue(cam.handle, "TriggerMode", MV_TRIGGER_MODE_OFF),
                  "TriggerMode Off");
-    warn_if_fail(MV_CC_SetEnumValue(handle, "GainAuto", MV_GAIN_MODE_CONTINUOUS),
+    warn_if_fail(MV_CC_SetEnumValue(cam.handle, "GainAuto", MV_GAIN_MODE_CONTINUOUS),
                  "GainAuto Continuous");
-    warn_if_fail(MV_CC_SetEnumValue(handle, "ExposureAuto", MV_EXPOSURE_AUTO_MODE_OFF),
+    warn_if_fail(MV_CC_SetEnumValue(cam.handle, "ExposureAuto", MV_EXPOSURE_AUTO_MODE_OFF),
                  "ExposureAuto Off");
-    warn_if_fail(MV_CC_SetFloatValue(handle, "ExposureTime", static_cast<float>(opt.exposure_us)),
+    warn_if_fail(MV_CC_SetFloatValue(cam.handle, "ExposureTime", static_cast<float>(opt.exposure_us)),
                  "ExposureTime");
-    warn_if_fail(MV_CC_SetBoolValue(handle, "AcquisitionFrameRateEnable", true),
+    warn_if_fail(MV_CC_SetBoolValue(cam.handle, "AcquisitionFrameRateEnable", true),
                  "AcquisitionFrameRateEnable");
-    warn_if_fail(MV_CC_SetFloatValue(handle, "AcquisitionFrameRate", static_cast<float>(opt.fps)),
+    warn_if_fail(MV_CC_SetFloatValue(cam.handle, "AcquisitionFrameRate", static_cast<float>(opt.fps)),
                  "AcquisitionFrameRate");
-    warn_if_fail(MV_CC_SetBayerCvtQuality(handle, 1), "BayerCvtQuality");
+    warn_if_fail(MV_CC_SetBayerCvtQuality(cam.handle, 1), "BayerCvtQuality");
+    uint32_t output_width = width;
+    uint32_t output_height = height;
+    const bool enable_center_crop = opt.crop_size > 0;
+
+    if (enable_center_crop) {
+    if (opt.crop_size > static_cast<int>(width) || opt.crop_size > static_cast<int>(height)) {
+        std::fprintf(stderr,
+                        "Requested crop size %d is larger than captured ROI %ux%u. "
+                        "Increase --roi-size or set --crop-size 0.\n",
+                        opt.crop_size, width, height);
+        result.reconnect = true;
+        cam.cleanup();
+        return result;
+    }
+    output_width = static_cast<uint32_t>(opt.crop_size);
+    output_height = static_cast<uint32_t>(opt.crop_size);
+    std::printf("Center crop before shm/encoder: %ux%u -> %ux%u\n",
+                width, height, output_width, output_height);
+    }
 
     const uint32_t stride = width * 3;
+    const uint32_t output_stride = output_width * 3;
     std::string error;
-    if (!ring.create(opt.shm_name, static_cast<uint32_t>(opt.slots), width, height,
-                     stride, rmcompress::SHM_PIXFMT_BGR8, &error)) {
+    unlink_shm_if_exists(opt.shm_name);
+    if (!ring.create(opt.shm_name, static_cast<uint32_t>(opt.slots), output_width, output_height,
+                     output_stride, rmcompress::SHM_PIXFMT_BGR8, &error)) {
         std::fprintf(stderr, "Failed to create shm ring %s: %s\n",
                      opt.shm_name, error.c_str());
         result.reconnect = true;
-        cleanup();
+        cam.cleanup();
         return result;
     }
     std::vector<uint8_t> bgr(static_cast<size_t>(stride) * height);
-
-    ret = MV_CC_StartGrabbing(handle);
+    std::vector<uint8_t> cropped_bgr(static_cast<size_t>(output_stride) * output_height);
+    ret = MV_CC_StartGrabbing(cam.handle);
     if (!check(ret, "MV_CC_StartGrabbing")) {
         result.reconnect = true;
-        cleanup();
+        cam.cleanup();
         return result;
     }
-
+    cam.grabbing = true;
     std::printf("Camera capture started: %ux%u BGR8 %.2f fps exposure %.1fus -> shm %s\n",
                 width, height, opt.fps, opt.exposure_us, opt.shm_name);
 
@@ -308,11 +734,11 @@ SessionResult run_camera_session(const CameraOptions& opt, int frames_remaining)
     int consecutive_errors = 0;
     while (!g_stop && (frames_remaining <= 0 || result.frames < frames_remaining)) {
         MV_FRAME_OUT frame{};
-        ret = MV_CC_GetImageBuffer(handle, &frame, 1000);
+        ret = MV_CC_GetImageBuffer(cam.handle, &frame, 200);
         if (ret != MV_OK) {
             std::fprintf(stderr, "MV_CC_GetImageBuffer timeout/error: 0x%x\n", ret);
             consecutive_errors++;
-            if (consecutive_errors >= 3) {
+            if (consecutive_errors >= 10) {
                 std::fprintf(stderr, "Camera grab failed %d times; reconnecting camera\n",
                              consecutive_errors);
                 result.reconnect = true;
@@ -321,34 +747,127 @@ SessionResult run_camera_session(const CameraOptions& opt, int frames_remaining)
             continue;
         }
         consecutive_errors = 0;
+        uint32_t frame_w = frame.stFrameInfo.nExtendWidth;
+        uint32_t frame_h = frame.stFrameInfo.nExtendHeight;
+        uint64_t frame_len = frame.stFrameInfo.nFrameLenEx;
 
-        MV_CC_PIXEL_CONVERT_PARAM_EX cvt{};
-        cvt.nWidth = frame.stFrameInfo.nExtendWidth;
-        cvt.nHeight = frame.stFrameInfo.nExtendHeight;
-        cvt.enSrcPixelType = frame.stFrameInfo.enPixelType;
-        cvt.pSrcData = frame.pBufAddr;
-        cvt.nSrcDataLen = static_cast<unsigned int>(frame.stFrameInfo.nFrameLenEx);
-        cvt.enDstPixelType = PixelType_Gvsp_BGR8_Packed;
-        cvt.pDstBuffer = bgr.data();
-        cvt.nDstBufferSize = static_cast<unsigned int>(bgr.size());
-        ret = MV_CC_ConvertPixelTypeEx(handle, &cvt);
-        MV_CC_FreeImageBuffer(handle, &frame);
-        if (ret != MV_OK || cvt.nDstLen != bgr.size()) {
-            std::fprintf(stderr, "MV_CC_ConvertPixelTypeEx failed/short: 0x%x len=%u\n",
-                         ret, cvt.nDstLen);
-            consecutive_errors++;
-            if (consecutive_errors >= 3) {
-                std::fprintf(stderr, "Pixel conversion failed %d times; reconnecting camera\n",
-                             consecutive_errors);
-                result.reconnect = true;
-                break;
-            }
+        if (frame_w == 0) {
+            frame_w = frame.stFrameInfo.nWidth;
+        }
+        if (frame_h == 0) {
+            frame_h = frame.stFrameInfo.nHeight;
+        }
+        if (frame_len == 0) {
+            frame_len = frame.stFrameInfo.nFrameLen;
+        }
+
+        if (frame.pBufAddr == nullptr || frame_w == 0 || frame_h == 0 || frame_len == 0) {
+            std::fprintf(stderr,
+                "Invalid frame buffer: w=%u h=%u len=%lu pixel=0x%x pBuf=%p\n",
+                frame_w,
+                frame_h,
+                static_cast<unsigned long>(frame_len),
+                frame.stFrameInfo.enPixelType,
+                frame.pBufAddr);
+
+            MV_CC_FreeImageBuffer(cam.handle, &frame);
             continue;
         }
 
-        ring.write_latest(bgr.data(), static_cast<uint32_t>(bgr.size()),
-                          rmcompress::monotonic_time_ns());
+        bool ok = convert_frame_to_bgr_opencv(frame, width, height, bgr);
+
+        MV_CC_FreeImageBuffer(cam.handle, &frame);
+
+        if (!ok) {
+            std::fprintf(
+                stderr,
+                "OpenCV pixel conversion failed: pixel=0x%x width=%u height=%u len=%lu\n",
+                frame.stFrameInfo.enPixelType,
+                frame.stFrameInfo.nExtendWidth ? frame.stFrameInfo.nExtendWidth : frame.stFrameInfo.nWidth,
+                frame.stFrameInfo.nExtendHeight ? frame.stFrameInfo.nExtendHeight : frame.stFrameInfo.nHeight,
+                static_cast<unsigned long>(
+                    frame.stFrameInfo.nFrameLenEx ? frame.stFrameInfo.nFrameLenEx : frame.stFrameInfo.nFrameLen));
+
+            // consecutive_errors++;
+
+            // if (consecutive_errors >= 10) {
+            //     std::fprintf(stderr, "Pixel conversion failed %d times; reconnecting camera\n",
+            //                 consecutive_errors);
+            //     result.reconnect = true;
+            //     break;
+            // }
+
+            continue;
+        }
+        const uint8_t* output_data = bgr.data();
+        uint32_t output_bytes = static_cast<uint32_t>(bgr.size());
+
+        if (enable_center_crop) {
+            if (!center_crop_bgr(bgr, width, height, output_width, output_height, cropped_bgr)) {
+                // consecutive_errors++;
+
+                // if (consecutive_errors >= 10) {
+                //     std::fprintf(stderr, "Center crop failed %d times; reconnecting camera\n",
+                //                  consecutive_errors);
+                //     result.reconnect = true;
+                //     break;
+                // }
+
+                continue;
+            }
+
+            output_data = cropped_bgr.data();
+            output_bytes = static_cast<uint32_t>(cropped_bgr.size());
+        }
+
+        // ring.write_latest(output_data, output_bytes, rmcompress::monotonic_time_ns());
+        if (!ring.write_latest(output_data, output_bytes, rmcompress::monotonic_time_ns())) {
+            std::fprintf(stderr,
+                        "shm write_latest failed: output_bytes=%u expected=%u width=%u height=%u stride=%u\n",
+                        output_bytes,
+                        output_stride * output_height,
+                        output_width,
+                        output_height,
+                        output_stride);
+            // consecutive_errors++;
+
+            // if (consecutive_errors >= 10) {
+            //     std::fprintf(stderr, "shm write failed %d times; reconnecting camera\n",
+            //                 consecutive_errors);
+            //     result.reconnect = true;
+            //     break;
+            // }
+
+            continue;
+        }
         result.frames++;
+        // MV_CC_PIXEL_CONVERT_PARAM_EX cvt{};
+        // cvt.nWidth = frame.stFrameInfo.nExtendWidth;
+        // cvt.nHeight = frame.stFrameInfo.nExtendHeight;
+        // cvt.enSrcPixelType = frame.stFrameInfo.enPixelType;
+        // cvt.pSrcData = frame.pBufAddr;
+        // cvt.nSrcDataLen = static_cast<unsigned int>(frame.stFrameInfo.nFrameLenEx);
+        // cvt.enDstPixelType = PixelType_Gvsp_BGR8_Packed;
+        // cvt.pDstBuffer = bgr.data();
+        // cvt.nDstBufferSize = static_cast<unsigned int>(bgr.size());
+        // ret = MV_CC_ConvertPixelTypeEx(cam.handle, &cvt);
+        // MV_CC_FreeImageBuffer(cam.handle, &frame);
+        // if (ret != MV_OK || cvt.nDstLen != bgr.size()) {
+        //     std::fprintf(stderr, "MV_CC_ConvertPixelTypeEx failed/short: 0x%x len=%u\n",
+        //                  ret, cvt.nDstLen);
+        //     consecutive_errors++;
+        //     if (consecutive_errors >= 3) {
+        //         std::fprintf(stderr, "Pixel conversion failed %d times; reconnecting camera\n",
+        //                      consecutive_errors);
+        //         result.reconnect = true;
+        //         break;
+        //     }
+        //     continue;
+        // }
+
+        // ring.write_latest(bgr.data(), static_cast<uint32_t>(bgr.size()),
+        //                   rmcompress::monotonic_time_ns());
+        // result.frames++;
 
         uint64_t now = rmcompress::monotonic_time_ns();
         if (now - last_report_ns >= 1000000000ULL) {
@@ -360,7 +879,7 @@ SessionResult run_camera_session(const CameraOptions& opt, int frames_remaining)
         }
     }
 
-    cleanup();
+    cam.cleanup();
     return result;
 }
 
@@ -396,7 +915,14 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--auto-square-roi") == 0) {
             opt.auto_square_roi = true;
             opt.allow_adjust_roi = true;
-        } else if (std::strcmp(argv[i], "--fps") == 0 && i + 1 < argc) {
+        } else if (std::strcmp(argv[i], "--crop-size") == 0 && i + 1 < argc) {
+            opt.crop_size = std::atoi(argv[++i]);
+            if (opt.crop_size < 0) {
+                std::fprintf(stderr, "--crop-size must be >= 0\n");
+                return 1;
+            }
+        }
+        else if (std::strcmp(argv[i], "--fps") == 0 && i + 1 < argc) {
             opt.fps = std::atof(argv[++i]);
         } else if (std::strcmp(argv[i], "--exposure-us") == 0 && i + 1 < argc) {
             opt.exposure_us = std::atof(argv[++i]);
@@ -414,10 +940,11 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
-
+    bool sdk_initialized = false;
     int ret = MV_CC_Initialize();
     if (!check(ret, "MV_CC_Initialize")) return 1;
-
+    sdk_initialized = true;
+    
     int reconnect_attempt = 0;
     int total_frames = 0;
 
@@ -429,16 +956,42 @@ int main(int argc, char** argv) {
         if (sr.reconnect && !g_stop && (opt.max_frames <= 0 || total_frames < opt.max_frames)) {
             reconnect_attempt++;
             int delay_s = std::min(5, reconnect_attempt);
-            std::fprintf(stderr, "Reconnecting camera in %ds (attempt %d)\n",
-                         delay_s, reconnect_attempt);
+
+            std::fprintf(stderr,
+                        "Full restarting camera pipeline in %ds (attempt %d)\n",
+                        delay_s,
+                        reconnect_attempt);
+
+            // 1. session 内部已经 cam.cleanup() 了
+            // 2. 这里再重启 MVS SDK
+            if (sdk_initialized) {
+                MV_CC_Finalize();
+                sdk_initialized = false;
+            }
+
+            // 3. 删除旧 shm，避免旧 header / 旧尺寸残留
+            unlink_shm_if_exists(opt.shm_name);
+
             for (int i = 0; i < delay_s && !g_stop; ++i) {
                 sleep(1);
             }
+
+            if (g_stop) {
+                break;
+            }
+
+            ret = MV_CC_Initialize();
+            if (!check(ret, "MV_CC_Initialize")) {
+                return 1;
+            }
+            sdk_initialized = true;
+
             continue;
         }
         break;
     }
 
     MV_CC_Finalize();
+    sdk_initialized = false;
     return 0;
 }

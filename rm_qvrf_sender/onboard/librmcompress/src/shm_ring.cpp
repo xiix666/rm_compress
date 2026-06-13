@@ -56,7 +56,7 @@ bool ShmRing::create(const std::string& name, uint32_t capacity, uint32_t width,
     name_ = normalize_name(name);
     owner_ = true;
     shm_unlink(name_.c_str());
-    fd_ = shm_open(name_.c_str(), O_CREAT | O_EXCL | O_RDWR, 0666);
+    fd_ = shm_open(name_.c_str(), O_CREAT | O_EXCL | O_RDWR, 0666); // 创建shm
     if (fd_ < 0) {
         if (error) *error = errno_msg("shm_open create");
         return false;
@@ -68,14 +68,14 @@ bool ShmRing::create(const std::string& name, uint32_t capacity, uint32_t width,
     mapping_size_ = sizeof(ShmRingHeader) +
                     static_cast<size_t>(capacity) * slot_bytes;
 
-    if (ftruncate(fd_, static_cast<off_t>(mapping_size_)) != 0) {
+    if (ftruncate(fd_, static_cast<off_t>(mapping_size_)) != 0) { // 设置shm大小
         if (error) *error = errno_msg("ftruncate");
         close();
         return false;
     }
 
     mapping_ = static_cast<uint8_t*>(
-        mmap(nullptr, mapping_size_, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0));
+        mmap(nullptr, mapping_size_, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0)); // 映射shm，返回shm地址指针
     if (mapping_ == MAP_FAILED) {
         mapping_ = nullptr;
         if (error) *error = errno_msg("mmap create");
@@ -139,7 +139,7 @@ bool ShmRing::open(const std::string& name, std::string* error) {
 
 void ShmRing::close() {
     if (mapping_) {
-        munmap(mapping_, mapping_size_);
+        munmap(mapping_, mapping_size_); //释放内存映射区
         mapping_ = nullptr;
     }
     if (fd_ >= 0) {
@@ -147,7 +147,7 @@ void ShmRing::close() {
         fd_ = -1;
     }
     if (owner_ && !name_.empty()) {
-        shm_unlink(name_.c_str());
+        shm_unlink(name_.c_str());  // 删除共享内存对象
     }
     mapping_size_ = 0;
     header_ = nullptr;
@@ -159,13 +159,13 @@ bool ShmRing::write_latest(const uint8_t* data, uint32_t data_bytes,
     if (!header_ || !data || data_bytes != header_->stride * header_->height)
         return false;
 
-    const uint64_t seq = __atomic_load_n(&header_->write_sequence, __ATOMIC_ACQUIRE) + 1;
-    const uint32_t index = static_cast<uint32_t>(seq % header_->capacity);
-    uint8_t* slot = slot_ptr(index);
+    const uint64_t seq = __atomic_load_n(&header_->write_sequence, __ATOMIC_ACQUIRE) + 1; //帧序号
+    const uint32_t index = static_cast<uint32_t>(seq % header_->capacity); //帧序号对环形缓冲区大小取模得到写入槽位index
+    uint8_t* slot = slot_ptr(index); //共享内存中对应槽位的地址
     auto* fh = reinterpret_cast<ShmFrameHeader*>(slot);
-    uint8_t* dst = slot + sizeof(ShmFrameHeader);
+    uint8_t* dst = slot + sizeof(ShmFrameHeader);  // 图像数据要写入的地址，前面是帧头
 
-    __atomic_store_n(&fh->sequence, seq | 1ULL, __ATOMIC_RELEASE);  // odd means writer in progress
+    __atomic_store_n(&fh->sequence, seq | 1ULL, __ATOMIC_RELEASE);  // odd means writer in progress  先将帧头的sequence设置为奇数，表示正在写入，读者看到奇数会知道数据不完整需要等待
     std::memcpy(dst, data, data_bytes);
     fh->timestamp_ns = timestamp_ns;
     fh->width = header_->width;
@@ -174,9 +174,9 @@ bool ShmRing::write_latest(const uint8_t* data, uint32_t data_bytes,
     fh->pixfmt = header_->pixfmt;
     fh->data_bytes = data_bytes;
     __atomic_store_n(&fh->sequence, seq << 1, __ATOMIC_RELEASE);  // even means complete
-    __atomic_store_n(&header_->write_sequence, seq, __ATOMIC_RELEASE);
-    __atomic_add_fetch(&header_->frames_written, 1ULL, __ATOMIC_RELAXED);
-    if (seq > header_->capacity) __atomic_add_fetch(&header_->frames_dropped, 1ULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&header_->write_sequence, seq, __ATOMIC_RELEASE);  //表示全局最新帧
+    __atomic_add_fetch(&header_->frames_written, 1ULL, __ATOMIC_RELAXED); //总写入帧数加 1
+    if (seq > header_->capacity) __atomic_add_fetch(&header_->frames_dropped, 1ULL, __ATOMIC_RELAXED); //发生覆盖的帧数 （感觉没啥用，缓冲区应该很快就占满了）
     return true;
 }
 
@@ -191,15 +191,15 @@ bool ShmRing::read_latest(std::vector<uint8_t>& out,
     uint8_t* slot = slot_ptr(index);
     auto* fh = reinterpret_cast<ShmFrameHeader*>(slot);
 
-    const uint64_t a = __atomic_load_n(&fh->sequence, __ATOMIC_ACQUIRE);
-    if ((a & 1ULL) != 0 || (a >> 1) != seq) return false;
+    const uint64_t a = __atomic_load_n(&fh->sequence, __ATOMIC_ACQUIRE); //判断是否写完
+    if ((a & 1ULL) != 0 || (a >> 1) != seq) return false;  //
 
     out.resize(fh->data_bytes);
     std::memcpy(out.data(), slot + sizeof(ShmFrameHeader), fh->data_bytes);
     const uint64_t b = __atomic_load_n(&fh->sequence, __ATOMIC_ACQUIRE);
     if (a != b || (b & 1ULL) != 0 || (b >> 1) != seq) return false;
 
-    if (frame_header) *frame_header = *fh;
+    if (frame_header) *frame_header = *fh;  
     *last_sequence = seq;
     return true;
 }

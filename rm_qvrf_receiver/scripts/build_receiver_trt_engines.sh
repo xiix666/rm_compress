@@ -2,12 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON="${ROOT}/client/.venv/bin/python"
 OUT_DIR="${ROOT}/models/engines"
 DEVICE="0"
 SIZE="448"
-BUILD_GS="1"
-BUILD_SR="1"
-BUILD_FUSED_SR="0"
+# SIZE="192"
+BUILD_GS="0"
+BUILD_SR="0"
+BUILD_FUSED_SR="1"
 SR_PRECISION="fp16"
 GS_ONNX=""
 SR_ONNX=""
@@ -77,7 +79,7 @@ mkdir -p "${OUT_DIR}"
 
 command -v trtexec >/dev/null || { echo "trtexec not found" >&2; exit 1; }
 
-read -r TRT_VERSION GPU_SAFE CC <<<"$(python3 - "${DEVICE}" <<'PY'
+read -r TRT_VERSION GPU_SAFE CC <<<"$("${PYTHON}" - "${DEVICE}" <<'PY'
 import re
 import sys
 
@@ -98,7 +100,7 @@ PY
 )"
 
 if [[ "${BUILD_SR}" == "1" && ! -f "${SR_ONNX}" ]]; then
-  python3 "${ROOT}/scripts/export_rlfn_to_onnx.py" \
+  "${PYTHON}" "${ROOT}/scripts/export_rlfn_to_onnx.py" \
     --rlfn-model "${RLFN_MODEL}" \
     --size "${SIZE}" \
     --output "${SR_ONNX}"

@@ -24,7 +24,9 @@ Options:
   --tail-flush-chunks N
 EOF
 }
-
+IPC_HOST="${IPC_HOST:-127.0.0.1}"
+IPC_PORT="${IPC_PORT:-49031}"
+CROP_SIZE=600
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --preset) PRESET="$2"; shift 2 ;;
@@ -96,7 +98,8 @@ echo "g_a=${TX_GA_BACKEND} device=${TX_DEVICE} trt_engine=${TX_TRT_ENGINE:-none}
 
 rm -f "/dev/shm${SHM_NAME}" 2>/dev/null || true
 
-CAM_CMD=("${CAM_BIN}" --device-index "${CAMERA_INDEX}" --roi-mode "${CAMERA_ROI_MODE}" --fps "${CAMERA_FPS}" --exposure-us "${EXPOSURE_US}" --shm-name "${SHM_NAME}" --slots 4)
+CAM_CMD=("${CAM_BIN}" --device-index "${CAMERA_INDEX}" --roi-mode "${CAMERA_ROI_MODE}" --fps "${CAMERA_FPS}" --exposure-us "${EXPOSURE_US}" --shm-name "${SHM_NAME}" --slots 4
+  --crop-size "${CROP_SIZE}")
 if [[ "${CAMERA_ROI_MODE}" == "fixed" ]]; then
   CAM_CMD+=(--roi-size "${ROI_SIZE}")
 fi
@@ -138,8 +141,12 @@ TX_CMD=(
   --chunk-rate-hz "${CHUNK_RATE_HZ}"
   --max-queue-chunks "${MAX_QUEUE_CHUNKS}"
   --chunk-order "${CHUNK_ORDER}"
-  -p "${SERIAL_PORT}" -b "${BAUDRATE}" -r 1
-  --serial-wait --profile
+  # -p "${SERIAL_PORT}" -b "${BAUDRATE}" -r 1
+  # --serial-wait --profile
+  --ipc-host "${IPC_HOST}"
+  --ipc-port "${IPC_PORT}"
+  --profile
+  # --dry-run
 )
 if [[ "${FRAMES}" != "0" ]]; then
   TX_CMD+=(-n "${FRAMES}")

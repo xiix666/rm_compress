@@ -532,12 +532,12 @@ class ClientWindow(QtWidgets.QMainWindow):
             cbb = self._pb.CustomByteBlock()
             cbb.ParseFromString(payload)
             data = bytes(cbb.data)
-            chunk = self._extract_stream_chunk(data)
+            chunk = self._extract_stream_chunk(data)             #  1
             if chunk is not None:
                 header = parse_chunk_header(chunk)
                 if header is not None:
                     self._chunks_recv += 1
-                    bitstream = self._assembler.add_chunk(chunk)
+                    bitstream = self._assembler.add_chunk(chunk) #  2
                     self._rx_log(
                         f"chunk frame={header.frame_id} cid={header.chunk_id}/{header.chunk_count} "
                         f"plen={header.payload_len} flags={header.flags} assembled={bitstream is not None} "
@@ -644,7 +644,7 @@ class ClientWindow(QtWidgets.QMainWindow):
     # Decode callbacks
     # ------------------------------------------------------------------
 
-    def _on_frame_ready(self, rgb_image, stats_dict):
+    def _on_frame_ready(self, rgb_image, stats_dict):    #  3
         """Handle a decoded + SR frame from the DecodeWorker."""
         t_display0 = time.perf_counter()
         self._frame_count += 1
@@ -656,6 +656,7 @@ class ClientWindow(QtWidgets.QMainWindow):
             self._last_fps = (len(self._fps_times) - 1) / elapsed if elapsed > 0 else 0
 
         self.video_panel.show_frame(rgb_image)
+        # self.video_panel.show_frame(rgb_image[:, :, ::-1].copy())
         if self._sample_frame_dir and self._sample_frames_saved < 5:
             import cv2
 

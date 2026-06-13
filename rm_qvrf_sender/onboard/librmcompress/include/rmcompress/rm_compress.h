@@ -11,15 +11,15 @@ typedef struct rm_compressor_s rm_compressor_t;
 
 typedef struct {
     const char* mbt_ir_path;    // path to mbt_g_a.xml
-    const char* mbt_bin_path;   // path to mbt_g_a.bin (or nullptr if same stem)
-    const char* ha_ir_path;     // path to mbt_h_a.xml (hyper-analysis)
-    const char* hs_ir_path;     // path to mbt_h_s.xml (hyper-synthesis, FP32)
+    const char* mbt_bin_path;   // path to mbt_g_a.bin (or nullptr if same stem)  图像编码
+    const char* ha_ir_path;     // path to mbt_h_a.xml (hyper-analysis)  超先验编码
+    const char* hs_ir_path;     // path to mbt_h_s.xml (hyper-synthesis, FP32)  超先验解码
     int         width;          // input width (default 128)
     int         height;         // input height (default 128)
     int         codec_width;    // preprocessed codec width (default 128)
     int         codec_height;   // preprocessed codec height (default 128)
     const char* device;         // OpenVINO device (default "GPU.0")
-    int         max_packed_bytes; // optional packed bitstream budget (default 560)
+    int         max_packed_bytes; // optional packed bitstream budget (default 560)  一帧的最大字节数
     int         codec;          // 0=MBT (default), 1=MS-SSIM_QVRF C++ sender
     const char* msssim_ga_path; // path to msssim_g_a.xml
     const char* msssim_ha_path; // path to msssim_h_a.xml

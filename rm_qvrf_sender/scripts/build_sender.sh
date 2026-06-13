@@ -13,9 +13,10 @@ fi
 if [[ -n "${MVS_ROOT}" ]]; then
   args+=(-DMVS_ROOT="${MVS_ROOT}")
 fi
-
+echo "CMake args: ${args[*]}"
 cmake "${args[@]}"
-cmake --build "${BUILD_DIR}" -j"$(nproc)"
+# cmake --build "${BUILD_DIR}" -j"$(nproc)"
+cmake --build "${BUILD_DIR}" -j2
 
 mkdir -p "${ROOT}/bin"
 cp -a "${BUILD_DIR}/rm_compress_cli" "${ROOT}/bin/"

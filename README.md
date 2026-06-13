@@ -1,3 +1,55 @@
+# 低码率吊射图传自定义客户端
+## 项目介绍xx
+
+###发送端： 
+环境搭建：install.sh
+编译：build_sender.sh
+
+运行：低分辨率模型运行run_camera_sender.sh；参数文件sender.env
+     	  高分辨率模型运行run_camera_448.sh ；参数文件448.env
+
+相机序列号硬编码写在camera_capture.cpp  : 
+```text
+kCameraSerial
+```
+.sh中
+```text
+CROP_SIZE 		裁剪大小
+  --ipc-host "${IPC_HOST}"
+  --ipc-port "${IPC_PORT}"   将数据通过TCP发布，便于模拟
+   -p "${SERIAL_PORT}" -b "${BAUDRATE}" -r 1
+  --serial-wait		串口发布
+```
+在本机测试走的网络链路如下：
+```text
+sender --TCP IPC--> ipc_to_mqtt_bridge --MQTT--> mosquitto broker --MQTT--> receiver
+```
+###IPC和MQTT桥接：
+```text
+python3  ./tools/ipc_to_mqtt.py
+```
+###MQTT代理
+```text
+mosquitto -p 3333 -v
+```
+###接收端：
+环境搭建：install.sh
+***注意由于建了一个.venv虚拟环境，网络模型环境所占空间较大，请先分配足够空间。
+先通过nvidia-smi查看显卡驱动的版本，默认安装的cuda tensorrt版本较高可能不匹配，这两者可以自己手动安装***
+模型构建：build_receiver_trt_engines.sh
+
+运行同理低分辨率run_receiver.sh；高分辨率run_448.sh；参数文件receiver.env
+
+```text
+MQTT_HOST=192.168.12.1   服务器给的懂的都懂
+MQTT_HOST=127.0.0.1   本地测试
+RX_FUSED_SR_TRT_ENGINE_192
+RX_FUSED_SR_TRT_ENGINE_448   这两个文件在本地模型构建后会有自己的名字，记得修改
+```
+
+##下面是东南的readme
+
+
 # [东南大学] 低码率吊射图传自定义客户端开源文档
 
 本项目基于 CompressAI 的 `mbt2018_mean` 预训练模型和 QVRF 可变码率控制，实现低码率吊射图传。当前 QVRF 分发包支持 `192 x 192 @ 24 FPS` 实时传输：链路侧为 48 Hz、每帧两个 300 B 物理包；协议头占用后，实际图像 payload 预算约为 `2 x 280 B = 560 B`。接收端可使用 fused TensorRT `g_s + RLFN x2` 路径，输出 384 x 384 画面。
@@ -9,14 +61,6 @@
 3. 鲁棒性强：基于预训练模型，不依赖强场景先验规则，场上更难遇到特定规则失效的 corner case。
 4. 功耗较低：操作手实测笔记本无外置电源可以在场上打三场；在充电宝帮助下预计可以打五场。
 5. 方便部署：可以在 agent 帮助下快速部署到多台自定义客户端电脑。本代码基于 RTX 4060 Laptop 开发，经测试，50 系显卡可通过简单修改并重建 TensorRT engine 完成部署。同时客户端已经完成了与裁判系统和官方客户端的通信，部署成功后可以直接使用。
-
-## 效果预览
-
-![效果预览](assets/result.png)
-
-画面确实比较模糊，但实测可以用于吊射矫正。对于发光弹丸，可以轻易判断落点；对于不发光弹丸，家里测试结果是只要打中基地也能判断落点。
-
-场上因为没有硬盘空间，没开高帧率录像，所以很遗憾没有从已有内录中找到带弹丸的图片。
 
 ## 方案选型
 

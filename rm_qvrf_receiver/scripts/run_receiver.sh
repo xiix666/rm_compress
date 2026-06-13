@@ -22,7 +22,8 @@ EOF
 
 USE_FUSED=1
 USER_NO_FUSED=0
-PRESET=qvrf448x6x8
+# PRESET=qvrf448x6x8
+PRESET=qvrf192x2x24
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --preset) PRESET="$2"; shift 2 ;;
@@ -85,6 +86,9 @@ ARGS=(
   --codec-size "${CODEC_SIZE}"
   --display-size "${DISPLAY_SIZE}"
   --receive-mode mqtt
+  # --receive-mode ipc
+  # --ipc-host 127.0.0.1
+  # --ipc-port 49031
   --mqtt-host "${MQTT_HOST}"
   --mqtt-port "${MQTT_PORT}"
   --client-id "${CLIENT_ID}"
@@ -101,6 +105,12 @@ if [[ "${USE_FUSED}" == "1" ]]; then
 fi
 
 cd "${ROOT}"
+
+QT_ROOT="${ROOT}/client/.venv/lib/python3.11/site-packages/PyQt5/Qt5"
+export LD_LIBRARY_PATH="${QT_ROOT}/lib:${LD_LIBRARY_PATH:-}"
+export QT_PLUGIN_PATH="${QT_ROOT}/plugins"
+export QT_QPA_PLATFORM_PLUGIN_PATH="${QT_ROOT}/plugins/platforms"
+
 export PYTHONPATH="${ROOT}/client/src:${ROOT}/commu/src:${ROOT}/compress-ai-gray-minimal:${PYTHONPATH:-}"
 export RM_STREAM_DEBUG_RX_CHUNKS="${DEBUG_RX_CHUNKS}"
 export RM_STREAM_BACKEND="${RX_BACKEND}"

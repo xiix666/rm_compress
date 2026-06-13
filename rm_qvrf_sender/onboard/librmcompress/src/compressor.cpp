@@ -411,11 +411,11 @@ int rm_compress_frame(rm_compressor_t* ctx,
         int h = ctx->config.height > 0 ? ctx->config.height : 128;
 
         auto t0 = std::chrono::steady_clock::now();
-        int codec_w = ctx->config.codec_width > 0 ? ctx->config.codec_width : 128;
+        int codec_w = ctx->config.codec_width > 0 ? ctx->config.codec_width : 128; //输入
         int codec_h = ctx->config.codec_height > 0 ? ctx->config.codec_height : codec_w;
         // Choose codec: route to MBT (beta-RC) or MS-SSIM QVRF (gain-RC)
         bool use_qvrf = (ctx->config.codec == 1 && ctx->msssim_loaded);
-
+        // 1 图像预处理
         // When the g_a encoder has fused preprocess, skip CPU preprocess_rgb()
         // and pass the raw BGR frame directly to the iGPU.
         const bool qvrf_has_pp = use_qvrf && ctx->encoder_msssim_g_a.has_preprocess();
@@ -424,20 +424,21 @@ int rm_compress_frame(rm_compressor_t* ctx,
         // CPU preprocess only when needed (TRT path or PPP fallback)
         const std::vector<float>* rgb_float_ptr = nullptr;
         if (!qvrf_has_pp && !mbt_has_pp) {
-            rgb_float_ptr = &preprocess_rgb(
+            rgb_float_ptr = &preprocess_rgb(         
                 rgb_buf, w, h, codec_w, codec_h, ctx->preprocess_scratch);
         }
         auto t1 = std::chrono::steady_clock::now();
 
         if (use_qvrf) {
             // ---- MS-SSIM QVRF path ----
+            // 2 g_a 推理
             auto y = qvrf_has_pp
                 ? ctx->encoder_msssim_g_a.encode_raw(rgb_buf, h, w)
                 : ctx->encoder_msssim_g_a.encode(rgb_float_ptr->data(), 3, codec_h, codec_w);
             auto t2 = std::chrono::steady_clock::now();
-            ctx->last_stats.preprocess_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
-            ctx->last_stats.g_a_ms = std::chrono::duration<float, std::milli>(t2 - t1).count();
-
+            ctx->last_stats.preprocess_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();//预处理耗时
+            ctx->last_stats.g_a_ms = std::chrono::duration<float, std::milli>(t2 - t1).count();//g_a 推理耗时
+            // 3 熵编码
             // Gain-RC: gain < 1 compresses latent; adapt from previous frame
             std::vector<std::string> y_str, z_str;
             int zh, zw;
@@ -448,10 +449,10 @@ int rm_compress_frame(rm_compressor_t* ctx,
             _entropy_encode_qvrf(ctx, y.data(), gain, y_str, z_str, zh, zw);
             auto p1 = std::chrono::steady_clock::now();
             ctx->last_stats.pass1_ms = std::chrono::duration<float, std::milli>(p1 - p0).count();
-            ctx->last_stats.rc_passes = 1;
+            ctx->last_stats.rc_passes = 1; //码率控制尝试次数
             int bits = _count_bits(y_str) + _count_bits(z_str);
             auto packed = pack_msssim_qvrf(y_str, z_str, zh, zw, gain);
-
+            // 4 超预算或或打包的字节数超了
             // First retry: reduce gain to shrink bitstream
             if (bits > ctx->budget_bits || (int)packed.size() > ctx->max_packed_bytes) {
                 gain = _qvrf_retry_gain(ctx, gain, bits, static_cast<int>(packed.size()));
@@ -485,10 +486,10 @@ int rm_compress_frame(rm_compressor_t* ctx,
                     std::chrono::steady_clock::now() - t_total0).count();
                 ctx->next_gain = _next_gain_after_frame(
                     ctx, start_gain, gain, static_cast<int>(packed.size()), true);
-                return -2;
+                return -2;  //代表这一帧字节数超了
             }
 
-            if ((int)packed.size() > *out_len) return -1;
+            if ((int)packed.size() > *out_len) return -1; //超了输出缓冲区容量
             auto tpack0 = std::chrono::steady_clock::now();
             std::memcpy(out_buf, packed.data(), packed.size());
             auto tpack1 = std::chrono::steady_clock::now();
